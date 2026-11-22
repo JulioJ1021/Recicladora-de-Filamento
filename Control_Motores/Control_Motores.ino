@@ -5,6 +5,8 @@
 
 #define PWM_TEST 2
 
+#define TIMEOUT_PULSOS_US 500000  // 500 ms
+
 #define FREQ_Puller   35
 #define FREQ_Extrusor   39
 
@@ -14,7 +16,7 @@
 #define PWM_FREQ      70000
 #define PWM_RESOL     10
 
-#define EMA_ALPHA 0.15f
+#define EMA_ALPHA 0.2f
 #define EMA_CV_ALPHA 0.2f
 
 #define PULSES_PER_REV_Puller  11.0f
@@ -30,8 +32,8 @@ float error_puller = 0;
 float error1_puller = 0;
 float error2_puller = 0;
 
-float Kp_puller = 2.5705;
-float Ki_puller = 5.8041;
+float Kp_puller = 1.4410;
+float Ki_puller = 4.5246;
 float Kd_puller = 0.000;
 
 // --- PID EXTRUSOR ---
@@ -45,7 +47,7 @@ float error1_extrusor = 0;
 float error2_extrusor = 0;
 
 float Kp_extrusor = 2.5705;
-float Ki_extrusor = 5.8041;
+float Ki_extrusor = 2.8041;
 float Kd_extrusor = 0.000;
 
 //--- Tiempo Muestreo Motores ---
@@ -53,7 +55,7 @@ float Tm = 0.05;
 
 
 // --- Timer ---
-const uint64_t CALC_PERIOD_US = 50000;   // 50 ms
+const uint64_t CALC_PERIOD_US = 100000;   // 50 ms
 const uint8_t  MISSED_LIMIT   = 20;      // 20 * 50 ms = 1 s sin flancos -> 0 Hz
 
 typedef struct {
@@ -61,6 +63,7 @@ typedef struct {
   volatile uint32_t period;   // ticks entre dos flancos de subida
   volatile bool     valid;    // hubo medición nueva
   bool              first;    // ya hay una referencia previa
+  volatile uint32_t last_pulse_us;
 } cap_data_t;
 
 static cap_data_t data_a = {0, 0, false, false};
@@ -92,6 +95,7 @@ static bool IRAM_ATTR cap_callback(mcpwm_cap_channel_handle_t chan,
                                    void *user_data)
 {
   cap_data_t *d = (cap_data_t *)user_data;
+  d->last_pulse_us = (uint32_t)esp_timer_get_time();
 
   if (d->first) {
     // La resta en uint32_t maneja bien el desbordamiento del contador
@@ -131,6 +135,7 @@ void setPWM(uint8_t pin,uint8_t duty){
 static void onTimer50ms(void *arg) {
 
   float freq_a = 0.0f, freq_b = 0.0f;
+  uint32_t ahora_us = (uint32_t)esp_timer_get_time();
 
   if (data_a.valid && data_a.period > 0) {
     freq_a = (float)res_hz / (float)data_a.period;
@@ -139,6 +144,7 @@ static void onTimer50ms(void *arg) {
     // Filtro EMA
     if (!emaInitialized_puller) {
       rpmEMA_puller = rpm_puller;
+      emaInitialized_puller = true;
       cvEmaInitialized_puller = true;
     } 
     else {
@@ -152,12 +158,26 @@ static void onTimer50ms(void *arg) {
     // Filtro EMA
     if (!emaInitialized_extrusor) {
         rpmEMA_extrusor = rpm_extrusor;
+        emaInitialized_extrusor = true;
         cvEmaInitialized_extrusor = true;
     }
     else {
         rpmEMA_extrusor = EMA_ALPHA * rpm_extrusor +
                           (1.0f - EMA_ALPHA) * rpmEMA_extrusor;
     }
+  }
+
+  // PULLER
+  if ((uint32_t)(ahora_us - data_a.last_pulse_us) > TIMEOUT_PULSOS_US) {
+      rpm_puller = 0;
+      rpmEMA_puller = 0;
+      //Serial.printf("ahora - antes: %d|| ",ahora_us - data_a.last_pulse_us );
+  }
+
+  // EXTRUSOR
+  if ((uint32_t)(ahora_us - data_b.last_pulse_us) > TIMEOUT_PULSOS_US) {
+      rpm_extrusor = 0;
+      rpmEMA_extrusor = 0;
   }
 
   // Si no llegan flancos nuevos, la próxima lectura reportará 0 Hz
@@ -230,65 +250,6 @@ static void onTimer50ms(void *arg) {
   // ---- APLICAR PWM FILTRADO ----
   setPWM(PWM_Extrusor, cvEMA_extrusor);
   return;
-
-  /*if (missedTicks < MISSED_LIMIT && ticks > 0) {
-
-    float f = (float)capResolutionHz / (float)ticks;
-
-    freqHz = f;
-
-    rpm = f * 60.0f / (PULSES_PER_REV * GEAR_RATIO);
-
-    // Filtro EMA
-    if (!emaInitialized) {
-      rpmEMA = rpm;
-      emaInitialized = true;
-    } 
-    else {
-      rpmEMA = EMA_ALPHA * rpm +
-               (1.0f - EMA_ALPHA) * rpmEMA;
-    }
-
-  } 
-  else {
-
-    freqHz = 0.0f;
-    rpm = 0.0f;
-
-    // Reiniciar filtro cuando se pierde la señal
-    rpmEMA = 0.0f;
-    emaInitialized = false;
-
-    lastCapture = 0;
-  }
-
-
-
-  //PID
-  // ---- SET POINT Y ERROR ----
-    // (Ejemplo usando el sp recibido por serial)
-    error = sp - rpmEMA;
-
-    // ---- ECUACION DE DIFERENCIAS ----
-    cv = cv1 + (Kp + Kd/Tm)*error + (-Kp + Ki*Tm - 2*Kd/Tm)*error1 + (Kd/Tm)*error2;
-    cv = constrain(cv, 0.0f, 100.0f);
-    // ---- FILTRO EMA DE LA SALIDA ----
-    if (!cvEmaInitialized) {
-        cvEMA = cv;
-        cvEmaInitialized = true;
-    }
-    else {
-        cvEMA = EMA_CV_ALPHA * cv +
-                (1.0f - EMA_CV_ALPHA) * cvEMA;
-    }
-
-    // Actualizar estados del controlador
-    cv1 = cv;
-    error2 = error1;
-    error1 = error;
-
-    // Aplicar PWM filtrado
-    setDuty(cvEMA);*/
 }
 
 void setupCalcTimer() {
