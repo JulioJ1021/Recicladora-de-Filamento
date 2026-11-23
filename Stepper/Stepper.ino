@@ -4,7 +4,7 @@
 #include "soc/gpio_struct.h"
 
 #define STEP_RPMS 10
-#define PASOS_X_VUELTA 2048
+#define PASOS_X_VUELTA 4096
 
 #define ST1 26
 #define ST2 27
@@ -73,9 +73,9 @@ void setup() {
 
 void loop() {
   // put your main code here, to run repeatedly:
-  delay(2000);
+  delay(60000);
   Stepper_ON();
-  delay(2000);
+  delay(60000);
   Stepper_OFF();
 
 }
