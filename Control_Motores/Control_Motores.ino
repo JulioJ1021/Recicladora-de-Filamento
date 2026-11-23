@@ -3,15 +3,15 @@
 #include "esp_attr.h"
 #include "esp_timer.h"
 
-#define PWM_TEST 2
-
 #define TIMEOUT_PULSOS_US 500000  // 500 ms
+#define TIMER1_PERIOD 50000 //us
 
+#define SENSOR_DIAM   36
 #define FREQ_Puller   35
 #define FREQ_Extrusor   39
 
-#define PWM_Puller    23
-#define PWM_Extrusor  14
+#define PWM_Puller    21
+#define PWM_Extrusor  25
 
 #define PWM_FREQ      70000
 #define PWM_RESOL     10
@@ -51,11 +51,11 @@ float Ki_extrusor = 2.8041;
 float Kd_extrusor = 0.000;
 
 //--- Tiempo Muestreo Motores ---
-float Tm = 0.05;
+float Tm = TIMER1_PERIOD/1000000.0f;
 
 
 // --- Timer ---
-const uint64_t CALC_PERIOD_US = 100000;   // 50 ms
+const uint64_t CALC_PERIOD_US = (uint64_t) TIMER1_PERIOD;   // 50 ms
 const uint8_t  MISSED_LIMIT   = 20;      // 20 * 50 ms = 1 s sin flancos -> 0 Hz
 
 typedef struct {
@@ -130,9 +130,10 @@ void setPWM(uint8_t pin,uint8_t duty){
   ledcWrite(pin, pwm);
 }
 
+
 // Corre cada 50 ms en contexto de tarea (float permitido)
 
-static void onTimer50ms(void *arg) {
+static void onTimer1(void *arg) {
 
   float freq_a = 0.0f, freq_b = 0.0f;
   uint32_t ahora_us = (uint32_t)esp_timer_get_time();
@@ -255,18 +256,15 @@ static void onTimer50ms(void *arg) {
 void setupCalcTimer() {
   esp_timer_handle_t calcTimer = NULL;
   esp_timer_create_args_t args = {};
-  args.callback        = &onTimer50ms;
+  args.callback        = &onTimer1;
   args.name            = "rpm_calc";
   args.dispatch_method = ESP_TIMER_TASK;
   ESP_ERROR_CHECK(esp_timer_create(&args, &calcTimer));
   ESP_ERROR_CHECK(esp_timer_start_periodic(calcTimer, CALC_PERIOD_US));
 }
-void setup()
-{
-  Serial.begin(115200);
-  delay(500);
 
-  // Un único timer de captura (grupo 0) compartido por ambos canales
+void Motor_control_Setup(){
+// Un único timer de captura (grupo 0) compartido por ambos canales
   mcpwm_cap_timer_handle_t cap_timer = NULL;
   mcpwm_capture_timer_config_t timer_cfg = {};
   timer_cfg.group_id = 0;
@@ -284,42 +282,36 @@ void setup()
 
   ledcAttach(PWM_Extrusor, PWM_FREQ, PWM_RESOL);
   ledcAttach(PWM_Puller, PWM_FREQ, PWM_RESOL);
-  ledcAttach(PWM_TEST, PWM_FREQ, PWM_RESOL);
 
   setupCalcTimer();      // al final, cuando capResolutionHz ya está definido
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(500);
+  Motor_control_Setup();
+}
+
+void setSP_Puller(float setpoint){
+  sp_puller = setpoint;
+}
+
+void setSP_Extrusor(float setpoint){
+  sp_extrusor = setpoint;
 }
 
 void loop()
 {
   delay(1000);
-  /*setPWM(PWM_Extrusor, 50);
-  setPWM(PWM_Puller, 50);
-  setPWM(PWM_TEST, 50);*/
-
   if (Serial.available() > 0) {
     String datos = Serial.readStringUntil('\n');
 
     int separador = datos.indexOf(',');
 
     if (separador != -1) {
-        sp_puller = datos.substring(0, separador).toFloat();
-        sp_extrusor = datos.substring(separador + 1).toFloat();
+        setSP_Puller(datos.substring(0, separador).toFloat());
+        setSP_Extrusor(datos.substring(separador + 1).toFloat());
     }
   }
-
-  /*float freq_a = 0.0f, freq_b = 0.0f;
-
-  if (data_a.valid && data_a.period > 0) {
-    freq_a = (float)res_hz / (float)data_a.period;
-  }
-  if (data_b.valid && data_b.period > 0) {
-    freq_b = (float)res_hz / (float)data_b.period;
-  }
-
-  // Si no llegan flancos nuevos, la próxima lectura reportará 0 Hz
-  data_a.valid = false;
-  data_b.valid = false;
-
-  Serial.printf("GPIO%d: %.2f Hz | GPIO%d: %.2f Hz\n",
-                FREQ_Puller, freq_a, FREQ_Extrusor, freq_b);*/
 }
