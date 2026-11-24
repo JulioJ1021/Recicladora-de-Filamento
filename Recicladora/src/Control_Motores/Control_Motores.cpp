@@ -14,7 +14,7 @@
 
 #define SENSOR_DIAM 36
 
-#define FREQ_Puller   35
+#define FREQ_Puller   34
 #define FREQ_Extrusor 39
 
 #define PWM_Puller   21
