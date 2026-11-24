@@ -11,6 +11,7 @@
 #include "src/Post_Extrusion/Post_Extrusion.h"
 #include "src/Stepper/Stepper.h"
 #include "src/Thermic_coils/Thermic_coils.h"
+#include "src/HMI_WiFi/HMI_WiFi.h"
 
 // ============================================================
 // CONFIGURACION DEL PROCESO
@@ -33,6 +34,13 @@
 
 // Monitor Serial
 #define SERIAL_BAUD 115200
+
+// HMI (pantalla web)
+#define INTERVALO_HMI 100          // ms entre lecturas publicadas a la HMI
+
+// Diametro del rodillo del puller en mm, para estimar los metros de
+// filamento enrollados (spool_m). 0 = no calcular (la HMI muestra 0 m).
+#define PULLER_DIAM_MM 0.0f
 
 // ============================================================
 // ESTADOS DE LA MAQUINA
@@ -65,6 +73,9 @@ unsigned long tiempoEstabilidad = 0;
 unsigned long tiempoMonitor = 0;
 
 const unsigned long INTERVALO_MONITOR = 1000;
+
+unsigned long tiempoHMI = 0;
+float spoolMetros = 0.0f;
 
 // Buffer Serial
 char comandoBuffer[32];
@@ -522,6 +533,92 @@ void leerSerial() {
 }
 
 // ============================================================
+// HMI WIFI (se ejecuta en el Core 1; el WiFi corre en el Core 0)
+// ============================================================
+
+bool maquinaEnMarcha() {
+
+    return estadoActual != ESPERA &&
+           estadoActual != DETENIDA;
+}
+
+// ------------------------------------------------------------
+
+void publicarDatosHMI() {
+
+    unsigned long ahora = millis();
+
+    // Metros enrollados: velocidad del puller x tiempo (solo si se
+    // definio PULLER_DIAM_MM y el embobinado esta activo)
+    static unsigned long ultimo = 0;
+    float dt = (ahora - ultimo) / 1000.0f;
+    ultimo = ahora;
+
+    if (PULLER_DIAM_MM > 0.0f && bobinando) {
+
+        spoolMetros +=
+            getRPM_Puller() * 3.14159265f *
+            (PULLER_DIAM_MM / 1000.0f) * dt / 60.0f;
+    }
+
+    HMIDatos d = {};
+
+    d.mica1 = SSR1.tempEMA;
+    d.mica2 = SSR2.tempEMA;
+
+    d.rpm_ext    = getRPM_Extrusor();
+    d.rpm_puller = getRPM_Puller();
+
+    d.diametro = getDiameter();
+    d.spool_m  = spoolMetros;
+
+    d.running = maquinaEnMarcha();
+
+    // No hay pulsador de emergencia leido por el codigo
+    d.estop = false;
+
+    // Etapas (solo indicador en la HMI)
+    d.tritu = (estadoActual == EXTRUYENDO ||
+               estadoActual == DETECTANDO_FILAMENTO ||
+               estadoActual == PRODUCIENDO_FILAMENTO);
+    d.extru = d.rpm_ext > 0.5f;
+    d.enfri = getCoolingState();
+    d.embo  = bobinando;
+
+    HMI_publicarDatos(d);
+}
+
+// ------------------------------------------------------------
+
+void procesarComandosHMI() {
+
+    HMIComando cmd;
+    uint8_t cliente;
+
+    while (HMI_leerComando(cmd, cliente)) {
+
+        if (cmd == HMI_START) {
+
+            if (maquinaEnMarcha()) {
+
+                HMI_responder(cliente, "start", false, "ya_en_marcha");
+
+            } else {
+
+                iniciarProceso();
+                HMI_responder(cliente, "start", true, "ok");
+            }
+        }
+
+        else if (cmd == HMI_STOP) {
+
+            detenerProceso();
+            HMI_responder(cliente, "stop", true, "ok");
+        }
+    }
+}
+
+// ============================================================
 // SETUP
 // ============================================================
 
@@ -561,6 +658,9 @@ void setup() {
 
     estadoActual = ESPERA;
 
+    // Comunicacion con la HMI (WiFi + WebSocket en el Core 0)
+    HMI_Setup();
+
     Serial.println("\nSistema inicializado.");
     Serial.println("Esperando comando START.");
 
@@ -579,6 +679,17 @@ void loop() {
     leerSerial();
 
     actualizarProceso();
+
+    // Comandos Start / Stop recibidos de la HMI
+    procesarComandosHMI();
+
+    // Publicar variables para la HMI
+    if (millis() - tiempoHMI >= INTERVALO_HMI) {
+
+        tiempoHMI = millis();
+
+        publicarDatosHMI();
+    }
 
     // Monitor de variables cada segundo
     if (millis() - tiempoMonitor >= INTERVALO_MONITOR) {
