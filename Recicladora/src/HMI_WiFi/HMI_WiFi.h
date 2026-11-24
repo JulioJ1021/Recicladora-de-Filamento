@@ -7,8 +7,8 @@
 // CONFIGURACION  (EDITAR)
 // ============================================================
 
-#define HMI_WIFI_SSID      "NOMBRE_DE_TU_WIFI"
-#define HMI_WIFI_PASSWORD  "CONTRASENA_DE_TU_WIFI"
+#define HMI_WIFI_SSID      "PIPECAJICA"
+#define HMI_WIFI_PASSWORD  "dafe1961"
 
 // Nombre en la red: la HMI abre ws://recicladora.local:81
 #define HMI_MDNS_NAME      "recicladora"
