@@ -26,7 +26,7 @@
 // ============================================================
 
 static bool ENFRIANDO = false;
-static bool EMBOBINANDO = false
+static bool EMBOBINANDO = false;
 
 static float diameter = 0.0f;
 static float rpm_puller = 0.0f;
