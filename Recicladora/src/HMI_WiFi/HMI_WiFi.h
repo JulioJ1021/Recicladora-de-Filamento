@@ -40,7 +40,8 @@ struct HMIDatos {
 
 enum HMIComando {
     HMI_START,
-    HMI_STOP
+    HMI_STOP,
+    HMI_BOBINAR
 };
 
 // ============================================================

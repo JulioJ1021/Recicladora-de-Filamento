@@ -226,11 +226,13 @@ void iniciarExtrusion() {
 // CONTROL DE EMBONINADO
 // ============================================================
 
-void iniciarBobinado() {
+// Devuelve true si el embobinado quedo activo; si no, "motivo" dice por que
+bool iniciarBobinado(const char **motivo) {
 
     if (bobinando) {
         Serial.println("El embobinador ya esta activo.");
-        return;
+        if (motivo) *motivo = "ya_embobinando";
+        return false;
     }
 
     if (estadoActual != PRODUCIENDO_FILAMENTO) {
@@ -239,13 +241,15 @@ void iniciarBobinado() {
             "No se puede bobinar: no hay filamento detectado."
         );
 
-        return;
+        if (motivo) *motivo = "sin_filamento";
+        return false;
     }
 
     if (getDiameter() <= UMBRAL_DETECCION_FILAMENTO) {
 
         Serial.println("Lectura de diametro insuficiente.");
-        return;
+        if (motivo) *motivo = "diametro_insuficiente";
+        return false;
     }
 
     setEmbobinando(true);
@@ -255,6 +259,9 @@ void iniciarBobinado() {
     bobinando = true;
 
     Serial.println("EMBOBINADO ACTIVADO");
+
+    if (motivo) *motivo = "ok";
+    return true;
 }
 
 // ------------------------------------------------------------
@@ -485,7 +492,7 @@ void procesarComando(char *comando) {
 
     else if (strcmp(comando, "BOBINAR") == 0) {
 
-        iniciarBobinado();
+        iniciarBobinado(nullptr);
     }
 
     else if (strcmp(comando, "DESBOBINAR") == 0) {
@@ -608,6 +615,13 @@ void procesarComandosHMI() {
                 iniciarProceso();
                 HMI_responder(cliente, "start", true, "ok");
             }
+        }
+
+        else if (cmd == HMI_BOBINAR) {
+
+            const char *motivo = "ok";
+            bool ok = iniciarBobinado(&motivo);
+            HMI_responder(cliente, "bobinar", ok, motivo);
         }
 
         else if (cmd == HMI_STOP) {

@@ -104,6 +104,7 @@ static void procesarMensaje(uint8_t num, uint8_t *payload, size_t length) {
 
     if      (strcmp(cmd, "start") == 0) msg.cmd = HMI_START;
     else if (strcmp(cmd, "stop")  == 0) msg.cmd = HMI_STOP;
+    else if (strcmp(cmd, "bobinar") == 0) msg.cmd = HMI_BOBINAR;
     else {
         ackDirecto(num, "unknown", false, "comando_desconocido");
         return;
