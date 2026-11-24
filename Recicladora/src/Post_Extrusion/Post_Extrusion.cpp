@@ -133,3 +133,11 @@ void Diam_timer_Setup() {
         esp_timer_start_periodic(diameter_timer, TM_DIAM)
     );
 }
+
+float getDiameter() {
+    return diameter;
+}
+
+bool getCoolingState() {
+    return ENFRIANDO;
+}

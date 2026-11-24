@@ -128,3 +128,7 @@ void Stepper_OFF() {
         (1UL << ST3) |
         (1UL << ST4);
 }
+
+bool Stepper_isRunning() {
+    return esp_timer_is_active(step_timer);
+}

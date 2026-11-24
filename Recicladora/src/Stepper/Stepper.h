@@ -6,5 +6,6 @@
 void Stepper_Init();
 void Stepper_ON();
 void Stepper_OFF();
+bool Stepper_isRunning();
 
 #endif

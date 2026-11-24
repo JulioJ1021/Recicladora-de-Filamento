@@ -7,5 +7,6 @@ void Anti_Atasco_Setup();
 
 void activarMotores();
 void apagarMotores();
+bool Anti_Atasco_isRecovering();
 
 #endif
