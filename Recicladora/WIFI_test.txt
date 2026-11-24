@@ -1,0 +1,883 @@
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebSocketsServer.h>
+#include <ArduinoJson.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+
+// ============================================================
+// MODULOS DE LA RECICLADORA
+// ============================================================
+
+#include "src/Thermic_coils/Thermic_coils.h"
+#include "src/Control_Motores/Control_Motores.h"
+#include "src/Post_Extrusion/Post_Extrusion.h"
+#include "src/Stepper/Stepper.h"
+#include "src/Anti_Atasco/Anti_Atasco.h"
+
+// ============================================================
+// CONFIGURACION WIFI
+// ============================================================
+
+const char* WIFI_SSID = "NOMBRE_DE_TU_WIFI";
+const char* WIFI_PASSWORD = "CONTRASENA_DE_TU_WIFI";
+
+// ============================================================
+// CONFIGURACION WEBSOCKET
+// ============================================================
+
+#define WEBSOCKET_PORT 81
+
+WebSocketsServer webSocket(WEBSOCKET_PORT);
+
+bool servidorIniciado = false;
+
+// ============================================================
+// CONFIGURACION DE TAREAS
+// ============================================================
+
+TaskHandle_t wifiTaskHandle = NULL;
+
+#define WIFI_TASK_STACK 8192
+#define WIFI_TASK_PRIORITY 1
+#define WIFI_TASK_CORE 0
+
+// ============================================================
+// CONFIGURACION DE TEMPORIZADORES
+// ============================================================
+
+const unsigned long INTERVALO_ESTADO = 500;
+const unsigned long INTERVALO_RECONEXION = 5000;
+const unsigned long INTERVALO_DATOS = 100;
+
+unsigned long tiempoEstado = 0;
+unsigned long tiempoReconexion = 0;
+unsigned long tiempoDatos = 0;
+
+// ============================================================
+// ESTADO DE LA MAQUINA
+// Estas variables son gestionadas por el Core 1
+// ============================================================
+
+bool running = false;
+bool estop = false;
+
+bool trituradoraActiva = false;
+
+float spool_m = 0.0;
+
+// ============================================================
+// ESTRUCTURA DE DATOS PARA LA HMI
+// ============================================================
+
+struct EstadoHMI {
+
+    float mica1;
+    float mica2;
+
+    float rpm_ext;
+    float rpm_puller;
+
+    float diametro;
+    float spool_m;
+
+    bool running;
+    bool estop;
+
+    bool tritu;
+    bool extru;
+    bool enfri;
+    bool embo;
+};
+
+// Copia compartida de los estados
+EstadoHMI estadoHMI = {0};
+
+// Protección de acceso entre núcleos
+portMUX_TYPE estadoMux = portMUX_INITIALIZER_UNLOCKED;
+
+// ============================================================
+// COLAS DE COMUNICACION ENTRE NUCLEOS
+// ============================================================
+
+enum TipoComando {
+    CMD_START,
+    CMD_STOP,
+    CMD_DESCONOCIDO
+};
+
+struct MensajeComando {
+
+    TipoComando comando;
+
+    uint8_t cliente;
+};
+
+struct MensajeACK {
+
+    uint8_t cliente;
+
+    char comando[12];
+
+    char reason[48];
+
+    bool ok;
+};
+
+QueueHandle_t colaComandos = NULL;
+QueueHandle_t colaACK = NULL;
+
+// ============================================================
+// PROTOTIPOS
+// ============================================================
+
+void wifiSetup();
+void wifiTask(void* parameter);
+void wifiLoop();
+
+void conectarWiFi();
+void iniciarWebSocket();
+
+void webSocketEvent(
+    uint8_t num,
+    WStype_t type,
+    uint8_t* payload,
+    size_t length
+);
+
+void procesarComando(
+    uint8_t num,
+    uint8_t* payload,
+    size_t length
+);
+
+void procesarSolicitudesHMI();
+
+void actualizarEstadoTelemetria();
+void enviarEstado();
+
+void procesarACK();
+void enviarACK(const MensajeACK& mensaje);
+
+// ============================================================
+// INICIALIZAR TAREA WIFI
+// Se llama desde setup() en Core 1
+// ============================================================
+
+void wifiSetup() {
+
+    // Crear colas antes de iniciar la tarea
+
+    colaComandos = xQueueCreate(
+        8,
+        sizeof(MensajeComando)
+    );
+
+    colaACK = xQueueCreate(
+        8,
+        sizeof(MensajeACK)
+    );
+
+    if (colaComandos == NULL || colaACK == NULL) {
+
+        Serial.println("ERROR: No se pudieron crear las colas");
+
+        return;
+    }
+
+    BaseType_t resultado = xTaskCreatePinnedToCore(
+        wifiTask,
+        "WiFi_Task",
+        WIFI_TASK_STACK,
+        NULL,
+        WIFI_TASK_PRIORITY,
+        &wifiTaskHandle,
+        WIFI_TASK_CORE
+    );
+
+    if (resultado != pdPASS) {
+
+        Serial.println("ERROR: No se pudo crear WiFi_Task");
+
+        wifiTaskHandle = NULL;
+
+        return;
+    }
+
+    Serial.println("Tarea WiFi creada en Core 0");
+}
+
+// ============================================================
+// TAREA WIFI
+// EJECUCION EXCLUSIVA EN CORE 0
+// ============================================================
+
+void wifiTask(void* parameter) {
+
+    Serial.printf(
+        "WiFi_Task ejecutandose en Core: %d\n",
+        xPortGetCoreID()
+    );
+
+    WiFi.mode(WIFI_STA);
+
+    WiFi.setAutoReconnect(true);
+
+    WiFi.persistent(false);
+
+    conectarWiFi();
+
+    for (;;) {
+
+        wifiLoop();
+
+        // Ceder tiempo de ejecucion
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+// ============================================================
+// CONECTAR WIFI
+// ============================================================
+
+void conectarWiFi() {
+
+    Serial.println();
+    Serial.println("Conectando a WiFi...");
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
+    );
+
+    tiempoReconexion = millis();
+}
+
+// ============================================================
+// INICIAR SERVIDOR WEBSOCKET
+// ============================================================
+
+void iniciarWebSocket() {
+
+    if (servidorIniciado) {
+        return;
+    }
+
+    webSocket.begin();
+
+    webSocket.onEvent(webSocketEvent);
+
+    webSocket.enableHeartbeat(
+        15000,
+        3000,
+        2
+    );
+
+    servidorIniciado = true;
+
+    Serial.println();
+    Serial.println("Servidor WebSocket iniciado");
+
+    Serial.print("IP ESP32: ");
+    Serial.println(WiFi.localIP());
+
+    Serial.print("Puerto: ");
+    Serial.println(WEBSOCKET_PORT);
+
+    Serial.print("Direccion: ws://");
+    Serial.print(WiFi.localIP());
+    Serial.print(":");
+    Serial.println(WEBSOCKET_PORT);
+}
+
+// ============================================================
+// EVENTOS WEBSOCKET
+// EJECUTADOS EN CORE 0
+// ============================================================
+
+void webSocketEvent(
+    uint8_t num,
+    WStype_t type,
+    uint8_t* payload,
+    size_t length
+) {
+
+    switch (type) {
+
+        case WStype_CONNECTED:
+
+            Serial.printf(
+                "Cliente conectado: %u\n",
+                num
+            );
+
+            break;
+
+        case WStype_DISCONNECTED:
+
+            Serial.printf(
+                "Cliente desconectado: %u\n",
+                num
+            );
+
+            break;
+
+        case WStype_TEXT:
+
+            procesarComando(
+                num,
+                payload,
+                length
+            );
+
+            break;
+
+        case WStype_ERROR:
+
+            Serial.println("Error WebSocket");
+
+            break;
+
+        default:
+
+            break;
+    }
+}
+
+// ============================================================
+// RECIBIR Y PROCESAR JSON
+// EJECUTADO EN CORE 0
+// ============================================================
+
+void procesarComando(
+    uint8_t num,
+    uint8_t* payload,
+    size_t length
+) {
+
+    JsonDocument doc;
+
+    DeserializationError error = deserializeJson(
+        doc,
+        payload,
+        length
+    );
+
+    if (error) {
+
+        MensajeACK respuesta = {};
+
+        respuesta.cliente = num;
+
+        strcpy(respuesta.comando, "unknown");
+
+        strcpy(respuesta.reason, "json_invalido");
+
+        respuesta.ok = false;
+
+        enviarACK(respuesta);
+
+        return;
+    }
+
+    const char* comando = doc["cmd"] | "";
+
+    MensajeComando mensaje = {};
+
+    mensaje.cliente = num;
+
+    if (strcmp(comando, "start") == 0) {
+
+        mensaje.comando = CMD_START;
+
+    }
+
+    else if (strcmp(comando, "stop") == 0) {
+
+        mensaje.comando = CMD_STOP;
+
+    }
+
+    else {
+
+        mensaje.comando = CMD_DESCONOCIDO;
+    }
+
+    // Enviar comando al Core 1
+
+    if (xQueueSend(
+        colaComandos,
+        &mensaje,
+        0
+    ) != pdPASS) {
+
+        MensajeACK respuesta = {};
+
+        respuesta.cliente = num;
+
+        strncpy(
+            respuesta.comando,
+            comando,
+            sizeof(respuesta.comando) - 1
+        );
+
+        strcpy(
+            respuesta.reason,
+            "cola_llena"
+        );
+
+        respuesta.ok = false;
+
+        enviarACK(respuesta);
+    }
+}
+
+// ============================================================
+// PROCESAR SOLICITUDES DE LA HMI
+// EJECUTADO EN CORE 1
+// ============================================================
+
+void procesarSolicitudesHMI() {
+
+    MensajeComando mensaje;
+
+    while (xQueueReceive(
+        colaComandos,
+        &mensaje,
+        0
+    ) == pdPASS) {
+
+        MensajeACK respuesta = {};
+
+        respuesta.cliente = mensaje.cliente;
+
+        // ----------------------------------------------------
+        // START
+        // ----------------------------------------------------
+
+        if (mensaje.comando == CMD_START) {
+
+            strcpy(
+                respuesta.comando,
+                "start"
+            );
+
+            if (estop) {
+
+                respuesta.ok = false;
+
+                strcpy(
+                    respuesta.reason,
+                    "emergencia_activa"
+                );
+
+            }
+
+            else {
+
+                respuesta.ok = true;
+
+                strcpy(
+                    respuesta.reason,
+                    "recibido_no_ejecutado"
+                );
+
+                Serial.println(
+                    "Solicitud START recibida"
+                );
+
+                // TODO:
+                // Conectar aqui la secuencia real de arranque.
+            }
+        }
+
+        // ----------------------------------------------------
+        // STOP
+        // ----------------------------------------------------
+
+        else if (mensaje.comando == CMD_STOP) {
+
+            strcpy(
+                respuesta.comando,
+                "stop"
+            );
+
+            respuesta.ok = true;
+
+            strcpy(
+                respuesta.reason,
+                "recibido_no_ejecutado"
+            );
+
+            Serial.println(
+                "Solicitud STOP recibida"
+            );
+
+            // TODO:
+            // Conectar aqui la secuencia real de parada.
+        }
+
+        // ----------------------------------------------------
+        // COMANDO DESCONOCIDO
+        // ----------------------------------------------------
+
+        else {
+
+            strcpy(
+                respuesta.comando,
+                "unknown"
+            );
+
+            respuesta.ok = false;
+
+            strcpy(
+                respuesta.reason,
+                "comando_desconocido"
+            );
+        }
+
+        // Enviar respuesta al Core 0
+
+        if (xQueueSend(
+            colaACK,
+            &respuesta,
+            0
+        ) != pdPASS) {
+
+            Serial.println("ERROR: Cola ACK llena");
+        }
+    }
+}
+
+// ============================================================
+// PROCESAR RESPUESTAS ACK
+// EJECUTADO EN CORE 0
+// ============================================================
+
+void procesarACK() {
+
+    MensajeACK mensaje;
+
+    while (xQueueReceive(
+        colaACK,
+        &mensaje,
+        0
+    ) == pdPASS) {
+
+        enviarACK(mensaje);
+    }
+}
+
+// ============================================================
+// ENVIAR ACK
+// EJECUTADO EN CORE 0
+// ============================================================
+
+void enviarACK(const MensajeACK& mensaje) {
+
+    if (!servidorIniciado) {
+        return;
+    }
+
+    JsonDocument doc;
+
+    doc["type"] = "ack";
+
+    doc["cmd"] = mensaje.comando;
+
+    doc["ok"] = mensaje.ok ? 1 : 0;
+
+    doc["reason"] = mensaje.reason;
+
+    String respuesta;
+
+    serializeJson(
+        doc,
+        respuesta
+    );
+
+    webSocket.sendTXT(
+        mensaje.cliente,
+        respuesta
+    );
+}
+
+// ============================================================
+// ACTUALIZAR ESTADOS DE LA RECICLADORA
+// EJECUTADO EN CORE 1
+// ============================================================
+
+void actualizarEstadoTelemetria() {
+
+    EstadoHMI nuevoEstado = {};
+
+    // --------------------------------------------------------
+    // TEMPERATURAS EMA
+    // --------------------------------------------------------
+
+    nuevoEstado.mica1 = SSR1.tempEMA;
+
+    nuevoEstado.mica2 = SSR2.tempEMA;
+
+    // --------------------------------------------------------
+    // RPM EMA
+    // --------------------------------------------------------
+
+    nuevoEstado.rpm_ext = getRPM_Extrusor();
+
+    nuevoEstado.rpm_puller = getRPM_Puller();
+
+    // --------------------------------------------------------
+    // POST EXTRUSION
+    // --------------------------------------------------------
+
+    nuevoEstado.diametro = getDiameter();
+
+    // --------------------------------------------------------
+    // METROS DE BOBINA
+    // --------------------------------------------------------
+
+    nuevoEstado.spool_m = spool_m;
+
+    // --------------------------------------------------------
+    // ESTADOS GENERALES
+    // --------------------------------------------------------
+
+    nuevoEstado.running = running;
+
+    nuevoEstado.estop = estop;
+
+    // --------------------------------------------------------
+    // ESTADOS DE ETAPAS
+    // --------------------------------------------------------
+
+    nuevoEstado.tritu = trituradoraActiva;
+
+    nuevoEstado.extru = nuevoEstado.rpm_ext > 0.5;
+
+    nuevoEstado.enfri = getCoolingState();
+
+    nuevoEstado.embo = Stepper_isRunning();
+
+    // --------------------------------------------------------
+    // PUBLICAR DATOS COMPARTIDOS
+    // --------------------------------------------------------
+
+    portENTER_CRITICAL(&estadoMux);
+
+    estadoHMI = nuevoEstado;
+
+    portEXIT_CRITICAL(&estadoMux);
+}
+
+// ============================================================
+// CONSTRUIR Y ENVIAR ESTADO JSON
+// EJECUTADO EN CORE 0
+// ============================================================
+
+void enviarEstado() {
+
+    if (!servidorIniciado) {
+        return;
+    }
+
+    if (webSocket.connectedClients() == 0) {
+        return;
+    }
+
+    EstadoHMI datos;
+
+    // Copiar datos protegidos
+
+    portENTER_CRITICAL(&estadoMux);
+
+    datos = estadoHMI;
+
+    portEXIT_CRITICAL(&estadoMux);
+
+    // --------------------------------------------------------
+    // CONSTRUIR JSON
+    // --------------------------------------------------------
+
+    JsonDocument doc;
+
+    doc["type"] = "state";
+
+    JsonArray micas = doc["micas"].to<JsonArray>();
+
+    micas.add(datos.mica1);
+
+    micas.add(datos.mica2);
+
+    doc["rpm_ext"] = datos.rpm_ext;
+
+    doc["rpm_puller"] = datos.rpm_puller;
+
+    doc["dia"] = datos.diametro;
+
+    doc["spool_m"] = datos.spool_m;
+
+    doc["running"] = datos.running ? 1 : 0;
+
+    doc["estop"] = datos.estop ? 1 : 0;
+
+    JsonObject stages = doc["stages"].to<JsonObject>();
+
+    stages["tritu"] = datos.tritu ? 1 : 0;
+
+    stages["extru"] = datos.extru ? 1 : 0;
+
+    stages["enfri"] = datos.enfri ? 1 : 0;
+
+    stages["embo"] = datos.embo ? 1 : 0;
+
+    // --------------------------------------------------------
+    // SERIALIZAR
+    // --------------------------------------------------------
+
+    String mensaje;
+
+    serializeJson(
+        doc,
+        mensaje
+    );
+
+    webSocket.broadcastTXT(mensaje);
+
+    Serial.println(mensaje);
+}
+
+// ============================================================
+// LOOP DE COMUNICACION
+// EJECUTADO EN CORE 0
+// ============================================================
+
+void wifiLoop() {
+
+    // --------------------------------------------------------
+    // RECONEXION WIFI
+    // --------------------------------------------------------
+
+    if (WiFi.status() != WL_CONNECTED) {
+
+        if (
+            millis() - tiempoReconexion >=
+            INTERVALO_RECONEXION
+        ) {
+
+            Serial.println("Reconectando WiFi...");
+
+            conectarWiFi();
+        }
+    }
+
+    else {
+
+        // ----------------------------------------------------
+        // INICIAR SERVIDOR UNA SOLA VEZ
+        // ----------------------------------------------------
+
+        if (!servidorIniciado) {
+
+            iniciarWebSocket();
+        }
+    }
+
+    // --------------------------------------------------------
+    // ATENDER WEBSOCKET
+    // --------------------------------------------------------
+
+    if (servidorIniciado) {
+
+        webSocket.loop();
+
+        procesarACK();
+    }
+
+    // --------------------------------------------------------
+    // ENVIO DE ESTADOS CADA 500 ms
+    // --------------------------------------------------------
+
+    if (
+        millis() - tiempoEstado >=
+        INTERVALO_ESTADO
+    ) {
+
+        tiempoEstado = millis();
+
+        enviarEstado();
+    }
+}
+
+// ============================================================
+// SETUP PRINCIPAL
+// EJECUTADO EN CORE 1
+// ============================================================
+
+void setup() {
+
+    Serial.begin(115200);
+
+    Serial.println();
+
+    Serial.println("Iniciando recicladora...");
+
+    // ========================================================
+    // INICIALIZACION DE LOS MODULOS
+    // ========================================================
+
+    // IMPORTANTE:
+    // Conserva aqui las llamadas de inicializacion que ya
+    // tienes funcionando para los cinco modulos.
+    //
+    // No invento sus nombres porque dependen de tus archivos
+    // actuales y de las funciones que ya utilizas.
+
+    // ========================================================
+    // INICIAR COMUNICACION WIFI
+    // ========================================================
+
+    wifiSetup();
+
+    Serial.printf(
+        "Control principal ejecutandose en Core: %d\n",
+        xPortGetCoreID()
+    );
+}
+
+// ============================================================
+// LOOP PRINCIPAL
+// EJECUTADO EN CORE 1
+// ============================================================
+
+void loop() {
+
+    // ========================================================
+    // ACTUALIZACION DE LOS MODULOS
+    // ========================================================
+
+    // Conserva aqui las llamadas de actualizacion de tus
+    // modulos actuales.
+
+    // ========================================================
+    // PROCESAR COMANDOS DE LA HMI
+    // ========================================================
+
+    procesarSolicitudesHMI();
+
+    // ========================================================
+    // ACTUALIZAR DATOS PARA LA HMI CADA 100 ms
+    // ========================================================
+
+    if (
+        millis() - tiempoDatos >=
+        INTERVALO_DATOS
+    ) {
+
+        tiempoDatos = millis();
+
+        actualizarEstadoTelemetria();
+    }
+}

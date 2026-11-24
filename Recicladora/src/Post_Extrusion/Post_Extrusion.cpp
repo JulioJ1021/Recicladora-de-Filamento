@@ -46,7 +46,7 @@ static float diam2rpms(float diam) {
 
 static float diam_calc(int sensor_read) {
 
-    float diam = sensor_read / 2.0f;
+    float diam = sensor_read / 8.0f;
 
     return diam;
 }
