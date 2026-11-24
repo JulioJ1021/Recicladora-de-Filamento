@@ -359,3 +359,7 @@ void Anti_Atasco_Setup() {
 
     Serial.println("Control anti-atasco iniciado");
 }
+
+bool Anti_Atasco_isRecovering() {
+    return secuencia_activa;
+}

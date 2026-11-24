@@ -26,6 +26,7 @@
 // ============================================================
 
 static bool ENFRIANDO = false;
+static bool EMBOBINANDO = false
 
 static float diameter = 0.0f;
 static float rpm_puller = 0.0f;
@@ -64,7 +65,7 @@ static void Diam_manage(void *arg) {
 
         GPIO.out_w1ts = (1UL << VENT);
 
-        ledcWrite(M_EMB, DUTY_EMB);
+        
 
         Serial.println("Frio");
 
@@ -140,4 +141,14 @@ float getDiameter() {
 
 bool getCoolingState() {
     return ENFRIANDO;
+}
+
+void setEmbobinando(bool state) {
+    EMBOBINANDO = state;
+
+    if (EMBOBINANDO) {
+        ledcWrite(M_EMB, DUTY_EMB);
+    } else {
+        ledcWrite(M_EMB, 0);
+    }
 }

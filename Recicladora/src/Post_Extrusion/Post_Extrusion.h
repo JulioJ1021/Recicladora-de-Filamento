@@ -8,5 +8,6 @@ void Post_Extrusion_Setup();
 void Diam_timer_Setup();
 float getDiameter();
 bool getCoolingState();
+void setEmbobinando(bool state);
 
 #endif
