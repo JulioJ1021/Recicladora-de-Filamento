@@ -41,7 +41,6 @@ static void Step_Timer_callback(void* arg) {
         (1UL << step_buffer[step_counter]) |
         (1UL << step_buffer[(step_counter + 1) & 3]);
 
-    Serial.println("n");
 }
 
 // ============================================================

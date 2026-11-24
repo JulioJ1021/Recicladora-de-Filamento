@@ -227,9 +227,9 @@ static void Corriente_callback(void *arg) {
 
         float corriente_actual = calcularCorriente();
 
-        Serial.print("Corriente RMS: ");
+        /*Serial.print("Corriente RMS: ");
         Serial.print(corriente_actual);
-        Serial.println(" A");
+        Serial.println(" A");*/
 
         // Reiniciar adquisición para la siguiente ventana
         valor_max = 0;
