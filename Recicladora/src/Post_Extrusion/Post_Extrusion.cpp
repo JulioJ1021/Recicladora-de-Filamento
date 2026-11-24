@@ -78,7 +78,7 @@ static void Diam_manage(void *arg) {
 
         GPIO.out_w1tc = (1UL << VENT);
 
-        ledcWrite(M_EMB, 0);
+        //ledcWrite(M_EMB, 0);
 
         // Setpoint RPM en 0
     }
