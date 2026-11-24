@@ -84,7 +84,7 @@ ControlSSR SSR1 = {
 
   .sp          = 120.0f,
   .kp          = 2.0f,
-  .ki          = 0.1f,
+  .ki          = 0.8f,
   .kd          = 0.0f,
   .tm          = TM_SSR / 1000000.0f,
 
@@ -107,12 +107,12 @@ ControlSSR SSR2 = {
 
   .tempRaw     = 0.0f,
   .tempEMA     = 0.0f,
-  .alphaTemp   = 0.2f,
+  .alphaTemp   = 0.3f,
   .tempEmaInit = false,
 
   .sp          = 60.0f,
   .kp          = 2.0f,
-  .ki          = 0.1f,
+  .ki          = 0.5f,
   .kd          = 0.0f,
   .tm          = TM_SSR / 1000000.0f,
 
@@ -270,18 +270,19 @@ void imprimirEstadoSSR(const ControlSSR &ssr, uint8_t zonaId) {
 // 6. SETUP Y LOOP
 // ============================================================
 
-void setup() {
-  Serial.begin(115200);
-
+void thermalSetup(){
   pinMode(SSR1_PIN, OUTPUT);
   pinMode(SSR2_PIN, OUTPUT);
   digitalWrite(SSR1_PIN, LOW);
   digitalWrite(SSR2_PIN, LOW);
-
-  delay(500);
-
   ventanaTimer_Setup();
   ssrTimer_Setup();
+}
+
+void setup() {
+  Serial.begin(115200);
+  thermalSetup();
+  delay(500); 
 }
 
 void loop() {
