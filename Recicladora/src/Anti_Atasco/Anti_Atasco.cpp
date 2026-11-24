@@ -347,7 +347,7 @@ void Anti_Atasco_Setup() {
     tiempo_inicio = esp_timer_get_time();
 
     // Activar funcionamiento normal
-    activarMotores();
+    //activarMotores();
 
     // Iniciar lectura periódica del ACS712
     ESP_ERROR_CHECK(
